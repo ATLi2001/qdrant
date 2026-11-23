@@ -18,6 +18,7 @@ use std::io::Write as _;
 use std::sync::LazyLock;
 
 use actix_web::{FromRequest, HttpRequest};
+use collection::operations::shard_selector_internal::ShardSelectorInternal;
 use collection::shards::shard::ShardId;
 use parking_lot::Mutex;
 use segment::types::SeqNumberType;
@@ -30,7 +31,7 @@ const CLIENT_HEADER: &str = "x-acvdb-client";
 const REQ_HEADER: &str = "x-acvdb-req";
 
 /// ACVDB runs use one shard, so a traced read selects it by id (which also makes it local-only).
-pub const TRACED_SHARD_ID: ShardId = 0;
+const TRACED_SHARD_ID: ShardId = 0;
 
 /// The replica trace's header line, as `kReplicaTraceHeader`.
 const TRACE_HEADER: &str = "kind,client_id,req_id,node,position,applied,received,sync\n";
@@ -151,29 +152,59 @@ pub fn record_write(op: TracedOp, ids: TraceIds, position: Option<SeqNumberType>
     ));
 }
 
-/// Log a read this peer ran with the writes up to `applied` applied and up to `received` taken
-/// up.
-pub fn record_read(op: TracedOp, ids: TraceIds, applied: SeqNumberType, received: SeqNumberType) {
-    let node = TRACE.as_ref().map_or(0, |trace| trace.node);
-    let TraceIds { client_id, req_id } = ids;
-    append(format_args!(
-        "{},{client_id},{req_id},{node},,{applied},{received},\n",
-        op.name(),
-    ));
+/// A traced read in progress. It holds this peer's replica of the one shard at a fixed applied
+/// position (`LocalShard::acvdb_read_positions`) until `record` or drop, so the read must run
+/// while it lives, on the shard `shard_selector` names.
+pub struct TracedRead {
+    op: TracedOp,
+    ids: TraceIds,
+    applied: OwnedRwLockReadGuard<SeqNumberType>,
+    received: SeqNumberType,
 }
 
-/// For a traced read: hold this peer's replica of the one shard at a fixed applied position
-/// (see `LocalShard::acvdb_read_positions`). Run the read while the guard lives.
-pub async fn read_positions(
-    toc: &TableOfContent,
-    auth: &Auth,
-    collection_name: &str,
-) -> Result<(OwnedRwLockReadGuard<SeqNumberType>, SeqNumberType), StorageError> {
-    let pass = auth.check_collection_access(
-        collection_name,
-        AccessRequirements::new(),
-        "acvdb_read_positions",
-    )?;
-    let collection = toc.get_collection(&pass).await?;
-    Ok(collection.acvdb_read_positions(TRACED_SHARD_ID).await?)
+impl TracedRead {
+    /// `None` for an untraced request (`ids` is `None`).
+    pub async fn start(
+        op: TracedOp,
+        ids: Option<TraceIds>,
+        toc: &TableOfContent,
+        auth: &Auth,
+        collection_name: &str,
+    ) -> Result<Option<Self>, StorageError> {
+        let Some(ids) = ids else {
+            return Ok(None);
+        };
+        let pass = auth.check_collection_access(
+            collection_name,
+            AccessRequirements::new(),
+            "acvdb_read_positions",
+        )?;
+        let collection = toc.get_collection(&pass).await?;
+        let (applied, received) = collection.acvdb_read_positions(TRACED_SHARD_ID).await?;
+        Ok(Some(Self {
+            op,
+            ids,
+            applied,
+            received,
+        }))
+    }
+
+    /// The traced shard by id, which also makes the read local-only: it must run on the
+    /// replica whose positions were taken.
+    pub fn shard_selector(&self) -> ShardSelectorInternal {
+        ShardSelectorInternal::ShardId(TRACED_SHARD_ID)
+    }
+
+    /// Log the read, which ran with the writes up to `applied` applied and up to `received`
+    /// taken up, and release the replica.
+    pub fn record(self) {
+        let node = TRACE.as_ref().map_or(0, |trace| trace.node);
+        let TraceIds { client_id, req_id } = self.ids;
+        append(format_args!(
+            "{},{client_id},{req_id},{node},,{},{},\n",
+            self.op.name(),
+            *self.applied,
+            self.received,
+        ));
+    }
 }

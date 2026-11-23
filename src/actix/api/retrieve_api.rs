@@ -25,7 +25,7 @@ use validator::Validate;
 use super::CollectionPath;
 use super::read_params::ReadParams;
 use super::routing_token::ActixRoutingToken;
-use crate::actix::acvdb_trace::{self, AcvdbIds, TracedOp};
+use crate::actix::acvdb_trace::{AcvdbIds, TracedOp, TracedRead};
 use crate::actix::auth::ActixAuth;
 use crate::actix::helpers::{
     get_request_hardware_counter, process_response, process_response_error,
@@ -108,19 +108,21 @@ async fn get_point(
     let timing = Instant::now();
 
     // A traced get runs on this peer's replica, at a fixed applied position.
-    let (acvdb_positions, shard_selection) = match acvdb_ids {
-        Some(_) => {
-            let toc = dispatcher.toc(&auth, &pass);
-            match acvdb_trace::read_positions(toc, &auth, &collection.collection_name).await {
-                Ok(positions) => (
-                    Some(positions),
-                    ShardSelectorInternal::ShardId(acvdb_trace::TRACED_SHARD_ID),
-                ),
-                Err(err) => return process_response_error(err, timing, None),
-            }
-        }
-        None => (None, ShardSelectorInternal::All),
+    let traced = match TracedRead::start(
+        TracedOp::Get,
+        acvdb_ids,
+        dispatcher.toc(&auth, &pass),
+        &auth,
+        &collection.collection_name,
+    )
+    .await
+    {
+        Ok(traced) => traced,
+        Err(err) => return process_response_error(err, timing, None),
     };
+    let shard_selection = traced
+        .as_ref()
+        .map_or(ShardSelectorInternal::All, TracedRead::shard_selector);
 
     let res = do_get_point(
         dispatcher.toc(&auth, &pass),
@@ -135,11 +137,10 @@ async fn get_point(
     .measured(request_hw_counter.get_counter())
     .await;
 
-    // A get that found nothing still read the replica.
-    if let (Some(ids), Some((applied, received)), Ok(_)) = (acvdb_ids, &acvdb_positions, &res) {
-        acvdb_trace::record_read(TracedOp::Get, ids, **applied, *received);
+    // A get that found nothing still read the replica. Either way, the replica is released here.
+    if let (Some(traced), Ok(_)) = (traced, &res) {
+        traced.record();
     }
-    drop(acvdb_positions);
 
     let res = res
         .and_then(|i| {
