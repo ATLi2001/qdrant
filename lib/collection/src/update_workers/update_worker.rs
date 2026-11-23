@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{oneshot, watch};
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::collection_manager::collection_updater::CollectionUpdater;
+use crate::collection_manager::collection_updater::{CollectionUpdater, UpdateOperationLock};
 use crate::operations::generalizer::Generalizer;
 use crate::operations::types::{CollectionError, CollectionResult, UpdateStatus};
 use crate::profiling::interface::log_request_to_collector;
@@ -50,7 +50,7 @@ impl UpdateWorkers {
         optimize_sender: Sender<OptimizerSignal>,
         wal: LockedWal,
         segments: LockedSegmentHolder,
-        update_operation_lock: Arc<tokio::sync::RwLock<()>>,
+        update_operation_lock: UpdateOperationLock,
         update_tracker: UpdateTracker,
         prevent_unoptimized: bool,
         optimizers: Arc<Vec<Arc<Optimizer>>>,
@@ -350,7 +350,7 @@ impl UpdateWorkers {
         wait: bool,
         wal: LockedWal,
         segments: LockedSegmentHolder,
-        update_operation_lock: Arc<tokio::sync::RwLock<()>>,
+        update_operation_lock: UpdateOperationLock,
         update_tracker: UpdateTracker,
         max_segment_size_bytes: Option<NonZeroUsize>,
         handoff: Handoff,
@@ -513,7 +513,7 @@ mod tests {
             optimize_sender,
             wal,
             segments.clone(),
-            Arc::new(TokioRwLock::new(())),
+            Arc::new(TokioRwLock::new(0)),
             UpdateTracker::default(),
             false,
             optimizers,

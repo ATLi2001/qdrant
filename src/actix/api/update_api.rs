@@ -14,6 +14,7 @@ use storage::dispatcher::Dispatcher;
 use validator::Validate;
 
 use super::CollectionPath;
+use crate::actix::acvdb_trace::{self, AcvdbIds, TracedOp};
 use crate::actix::auth::ActixAuth;
 use crate::actix::helpers::{
     get_request_hardware_counter, process_response, process_response_with_inference_usage,
@@ -39,6 +40,7 @@ async fn upsert_points(
     service_config: web::Data<ServiceConfig>,
     ActixAuth(auth): ActixAuth,
     api_keys: InferenceApiKeys,
+    AcvdbIds(acvdb_ids): AcvdbIds,
 ) -> impl Responder {
     let operation = operation.into_inner();
 
@@ -69,6 +71,10 @@ async fn upsert_points(
         Err(err) => (Err(err), None),
     };
 
+    if let (Some(ids), Ok(update_result)) = (acvdb_ids, &res) {
+        acvdb_trace::record_write(TracedOp::Upsert, ids, update_result.operation_id);
+    }
+
     process_response_with_inference_usage(
         res,
         timing,
@@ -85,6 +91,7 @@ async fn delete_points(
     params: Query<UpdateParams>,
     service_config: web::Data<ServiceConfig>,
     ActixAuth(auth): ActixAuth,
+    AcvdbIds(acvdb_ids): AcvdbIds,
 ) -> impl Responder {
     let operation = operation.into_inner();
 
@@ -106,6 +113,10 @@ async fn delete_points(
     )
     .measured(request_hw_counter.get_counter())
     .await;
+
+    if let (Some(ids), Ok(update_result)) = (acvdb_ids, &res) {
+        acvdb_trace::record_write(TracedOp::Delete, ids, update_result.operation_id);
+    }
 
     process_response(res, timing, request_hw_counter.to_rest_api())
 }

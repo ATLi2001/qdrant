@@ -22,7 +22,7 @@ use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::collection_manager::collection_updater::CollectionUpdater;
+use crate::collection_manager::collection_updater::{CollectionUpdater, UpdateOperationLock};
 use crate::collection_manager::optimizers::segment_optimizer::plan_optimizations;
 use crate::collection_manager::optimizers::{
     Tracker, TrackerLog, TrackerSegmentInfo, TrackerStatus,
@@ -54,7 +54,7 @@ impl UpdateWorkers {
         max_handles: Option<usize>,
         has_triggered_optimizers: Arc<AtomicBool>,
         payload_index_schema: Arc<SaveOnDisk<PayloadIndexSchema>>,
-        update_operation_lock: Arc<tokio::sync::RwLock<()>>,
+        update_operation_lock: UpdateOperationLock,
         update_tracker: UpdateTracker,
         optimization_finished_sender: watch::Sender<()>,
     ) {
@@ -530,7 +530,7 @@ impl UpdateWorkers {
     async fn try_recover(
         segments: LockedSegmentHolder,
         wal: LockedWal,
-        update_operation_lock: Arc<tokio::sync::RwLock<()>>,
+        update_operation_lock: UpdateOperationLock,
         update_tracker: UpdateTracker,
         max_segment_size_bytes: Option<std::num::NonZeroUsize>,
     ) -> CollectionResult<usize> {

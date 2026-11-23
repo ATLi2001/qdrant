@@ -25,6 +25,7 @@ use validator::Validate;
 use super::CollectionPath;
 use super::read_params::ReadParams;
 use super::routing_token::ActixRoutingToken;
+use crate::actix::acvdb_trace::{self, AcvdbIds, TracedOp};
 use crate::actix::auth::ActixAuth;
 use crate::actix::helpers::{
     get_request_hardware_counter, process_response, process_response_error,
@@ -47,6 +48,7 @@ async fn do_get_point(
     read_consistency: Option<ReadConsistency>,
     routing_token: Option<RoutingToken>,
     timeout: Option<Duration>,
+    shard_selection: ShardSelectorInternal,
     auth: Auth,
 ) -> Result<Option<RecordInternal>, StorageError> {
     let request = PointRequestInternal {
@@ -54,8 +56,6 @@ async fn do_get_point(
         with_payload: Some(WithPayloadInterface::Bool(true)),
         with_vector: true.into(),
     };
-
-    let shard_selection = ShardSelectorInternal::All;
 
     toc.retrieve(
         collection_name,
@@ -79,6 +79,7 @@ async fn get_point(
     service_config: web::Data<ServiceConfig>,
     ActixAuth(auth): ActixAuth,
     ActixRoutingToken(routing_token): ActixRoutingToken,
+    AcvdbIds(acvdb_ids): AcvdbIds,
 ) -> impl Responder {
     let pass = match check_strict_mode_timeout(
         params.timeout_as_secs(),
@@ -106,6 +107,21 @@ async fn get_point(
     );
     let timing = Instant::now();
 
+    // A traced get runs on this peer's replica, at a fixed applied position.
+    let (acvdb_positions, shard_selection) = match acvdb_ids {
+        Some(_) => {
+            let toc = dispatcher.toc(&auth, &pass);
+            match acvdb_trace::read_positions(toc, &auth, &collection.collection_name).await {
+                Ok(positions) => (
+                    Some(positions),
+                    ShardSelectorInternal::ShardId(acvdb_trace::TRACED_SHARD_ID),
+                ),
+                Err(err) => return process_response_error(err, timing, None),
+            }
+        }
+        None => (None, ShardSelectorInternal::All),
+    };
+
     let res = do_get_point(
         dispatcher.toc(&auth, &pass),
         &collection.collection_name,
@@ -113,16 +129,25 @@ async fn get_point(
         params.consistency,
         routing_token,
         params.timeout(),
+        shard_selection,
         auth,
     )
     .measured(request_hw_counter.get_counter())
-    .await
-    .and_then(|i| {
-        i.ok_or_else(|| {
-            StorageError::not_found(format!("Point with id {point_id} does not exists!"))
+    .await;
+
+    // A get that found nothing still read the replica.
+    if let (Some(ids), Some((applied, received)), Ok(_)) = (acvdb_ids, &acvdb_positions, &res) {
+        acvdb_trace::record_read(TracedOp::Get, ids, **applied, *received);
+    }
+    drop(acvdb_positions);
+
+    let res = res
+        .and_then(|i| {
+            i.ok_or_else(|| {
+                StorageError::not_found(format!("Point with id {point_id} does not exists!"))
+            })
         })
-    })
-    .map(api::rest::Record::from);
+        .map(api::rest::Record::from);
 
     process_response(res, timing, request_hw_counter.to_rest_api())
 }

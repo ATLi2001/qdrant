@@ -737,6 +737,9 @@ fn main() -> anyhow::Result<()> {
     // REST API server
     //
 
+    // Before serving, so a bad trace path fails at startup.
+    actix::acvdb_trace::init();
+
     {
         let dispatcher_arc = dispatcher_arc.clone();
         let telemetry_collector = telemetry_collector.clone();

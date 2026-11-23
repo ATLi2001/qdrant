@@ -16,6 +16,7 @@ use tokio::sync::{Mutex as TokioMutex, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::collection::payload_index_schema::PayloadIndexSchema;
+use crate::collection_manager::collection_updater::UpdateOperationLock;
 use crate::collection_manager::optimizers::TrackerLog;
 use crate::collection_manager::optimizers::segment_optimizer::{
     SegmentOptimizer, plan_optimizations,
@@ -130,7 +131,7 @@ pub struct UpdateHandler {
     /// re-sharding and shard transfer, so explicit lock for those operations is required.
     ///
     /// Write lock must be held for updates, while read lock must be held for scroll
-    scroll_read_lock: Arc<tokio::sync::RwLock<()>>,
+    scroll_read_lock: UpdateOperationLock,
 
     update_tracker: UpdateTracker,
 
@@ -156,7 +157,7 @@ impl UpdateHandler {
         prevent_unoptimized: bool,
         clocks: LocalShardClocks,
         shard_path: PathBuf,
-        scroll_read_lock: Arc<tokio::sync::RwLock<()>>,
+        scroll_read_lock: UpdateOperationLock,
         update_tracker: UpdateTracker,
         applied_seq_handler: Arc<AppliedSeqHandler>,
     ) -> Self {

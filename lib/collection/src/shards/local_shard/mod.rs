@@ -1,3 +1,4 @@
+pub(super) mod acvdb;
 pub(super) mod bm25;
 pub mod clock_map;
 pub mod disk_usage_watcher;
@@ -72,7 +73,7 @@ use self::clock_map::{ClockMap, RecoveryPoint};
 use self::disk_usage_watcher::DiskUsageWatcher;
 use super::update_tracker::UpdateTracker;
 use crate::collection::payload_index_schema::PayloadIndexSchema;
-use crate::collection_manager::collection_updater::CollectionUpdater;
+use crate::collection_manager::collection_updater::{CollectionUpdater, UpdateOperationLock};
 use crate::collection_manager::holders::segment_holder::{
     LockedSegment, PostFlushOutcome, SegmentHolder,
 };
@@ -146,7 +147,7 @@ pub struct LocalShard {
     ///   create inconsistencies if updates are applied concurrently.
     ///
     /// Write lock must be held for updates, while read lock must be held for critical sections
-    pub(super) update_operation_lock: Arc<tokio::sync::RwLock<()>>,
+    pub(super) update_operation_lock: UpdateOperationLock,
 
     /// Persist the applied op_num sequence number
     applied_seq_handler: Arc<AppliedSeqHandler>,
@@ -288,7 +289,7 @@ impl LocalShard {
         )
         .await;
 
-        let scroll_read_lock = Arc::new(tokio::sync::RwLock::new(()));
+        let scroll_read_lock = Arc::new(tokio::sync::RwLock::new(0));
         let update_tracker = UpdateTracker::default();
 
         let wal_last_index = locked_wal.lock().await.last_index();

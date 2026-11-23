@@ -1,4 +1,5 @@
 pub mod actix_telemetry;
+pub mod acvdb_trace;
 pub mod api;
 mod auth;
 mod certificate_helpers;

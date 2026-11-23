@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use super::CollectionPath;
 use super::read_params::ReadParams;
 use super::routing_token::ActixRoutingToken;
+use crate::actix::acvdb_trace::{self, AcvdbIds, TracedOp};
 use crate::actix::auth::ActixAuth;
 use crate::actix::helpers::{
     get_request_hardware_counter, process_response, process_response_error,
@@ -25,6 +26,7 @@ use crate::common::query::{
 use crate::settings::ServiceConfig;
 
 #[post("/collections/{collection_name}/points/search")]
+#[allow(clippy::too_many_arguments)]
 async fn search_points(
     dispatcher: web::Data<Dispatcher>,
     collection: Path<CollectionPath>,
@@ -33,6 +35,7 @@ async fn search_points(
     service_config: web::Data<ServiceConfig>,
     ActixAuth(auth): ActixAuth,
     ActixRoutingToken(routing_token): ActixRoutingToken,
+    AcvdbIds(acvdb_ids): AcvdbIds,
 ) -> HttpResponse {
     let SearchRequest {
         search_request,
@@ -52,11 +55,6 @@ async fn search_points(
         Err(err) => return process_response_error(err, Instant::now(), None),
     };
 
-    let shard_selection = match shard_key {
-        None => ShardSelectorInternal::All,
-        Some(shard_keys) => shard_keys.into(),
-    };
-
     let request_hw_counter = get_request_hardware_counter(
         &dispatcher,
         collection.collection_name.clone(),
@@ -65,6 +63,27 @@ async fn search_points(
     );
 
     let timing = Instant::now();
+
+    // A traced search runs on this peer's replica, at a fixed applied position.
+    let (acvdb_positions, shard_selection) = match acvdb_ids {
+        Some(_) => {
+            let toc = dispatcher.toc(&auth, &pass);
+            match acvdb_trace::read_positions(toc, &auth, &collection.collection_name).await {
+                Ok(positions) => (
+                    Some(positions),
+                    ShardSelectorInternal::ShardId(acvdb_trace::TRACED_SHARD_ID),
+                ),
+                Err(err) => return process_response_error(err, timing, None),
+            }
+        }
+        None => (
+            None,
+            match shard_key {
+                None => ShardSelectorInternal::All,
+                Some(shard_keys) => shard_keys.into(),
+            },
+        ),
+    };
 
     let result = do_core_search_points(
         dispatcher.toc(&auth, &pass),
@@ -84,6 +103,11 @@ async fn search_points(
             .map(api::rest::ScoredPoint::from)
             .collect_vec()
     });
+
+    if let (Some(ids), Some((applied, received)), Ok(_)) = (acvdb_ids, &acvdb_positions, &result) {
+        acvdb_trace::record_read(TracedOp::Search, ids, **applied, *received);
+    }
+    drop(acvdb_positions);
 
     process_response(result, timing, request_hw_counter.to_rest_api())
 }

@@ -9,6 +9,14 @@ use crate::operations::CollectionUpdateOperations;
 use crate::operations::types::{CollectionError, CollectionResult};
 use crate::shards::update_tracker::UpdateTracker;
 
+/// Held for writing while one operation is applied to the segments, and for
+/// reading by readers that must not see an operation half-applied (scroll,
+/// and ACVDB-traced reads).  The value is the highest op_num applied under
+/// it (0 before any), so a reader holding it has exactly the operations up
+/// to that op_num in its segments.  ACVDB's replica trace reads it as the
+/// read's applied position.
+pub type UpdateOperationLock = Arc<tokio::sync::RwLock<SeqNumberType>>;
+
 /// Implementation of the update operation
 #[derive(Default)]
 pub struct CollectionUpdater {}
@@ -42,7 +50,7 @@ impl CollectionUpdater {
         segments: &LockedSegmentHolder,
         op_num: SeqNumberType,
         operation: CollectionUpdateOperations,
-        update_operation_lock: Arc<tokio::sync::RwLock<()>>,
+        update_operation_lock: UpdateOperationLock,
         update_tracker: UpdateTracker,
         max_segment_size_bytes: Option<NonZeroUsize>,
     ) -> CollectionResult<usize> {
@@ -51,7 +59,7 @@ impl CollectionUpdater {
             // Allow only one update at a time, ensure no data races between segments.
             // let _update_lock = self.update_lock.lock().unwrap();
 
-            let _update_operation_lock = update_operation_lock.blocking_write();
+            let mut applied_op_num = update_operation_lock.blocking_write();
             let _update_guard = update_tracker.update();
             // Similar to `_update_operation_lock`, but used for operations inside segment holder
             // E.g. optimization finalization may require update operation lock
@@ -60,7 +68,7 @@ impl CollectionUpdater {
 
             let segments_guard = segments.read();
 
-            match operation {
+            let result = match operation {
                 CollectionUpdateOperations::PointOperation(point_operation) => {
                     process_point_operation(
                         &segments_guard,
@@ -99,7 +107,12 @@ impl CollectionUpdater {
                         staging_operation,
                     )
                 }
-            }
+            };
+            // Set even if the operation failed: its op_num is consumed and
+            // nothing of it is left half-applied.  Max, because recovery
+            // (`try_recover`) re-applies older failed operations.
+            *applied_op_num = (*applied_op_num).max(op_num);
+            result
         });
 
         let operation_result = operation_result.map_err(CollectionError::from);
